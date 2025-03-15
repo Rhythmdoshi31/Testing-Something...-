@@ -58,7 +58,7 @@ class ContainerSpace {
 }
 
 // Optimized placement algorithm
-function placeItems(items, containers) {
+async function placeItems(items, containers) {
     // Sort containers by available space (largest first)
     containers.sort((a, b) =>
         b.width * b.depth * b.height - a.width * a.depth * a.height
@@ -68,9 +68,20 @@ function placeItems(items, containers) {
     let containerSpaces = containers.map(container => new ContainerSpace(container));
 
     for (let item of items) {
+        console.log(`🔍 Checking Item: ${item.itemId}, Space Needed: ${item.width * item.depth * item.height}`);
+
         let placed = false;
 
         for (let container of containerSpaces) {
+            let remainingSpace = container.width * container.depth * container.height;
+            console.log(`✅ Checking Container: ${container.containerId}, Remaining Space: ${remainingSpace}`);
+
+            // ❌ **Fix: Skip items that are too large**
+            if (item.width > container.width || item.depth > container.depth || item.height > container.height) {
+                console.log(`❌ Item ${item.itemId} is too large for Container ${container.containerId}`);
+                continue;
+            }
+
             let position = container.canFitItem(item);
             if (position) {
                 container.placeItem(item, position.x, position.y, position.z);
@@ -86,6 +97,27 @@ function placeItems(items, containers) {
                         }
                     }
                 });
+
+                // Save placement to MongoDB
+                await Item.updateOne(
+                    { itemId: item.itemId },
+                    {
+                        $set: {
+                            containerId: container.containerId,
+                            position: {
+                                startCoordinates: { width: position.x, depth: position.y, height: position.z },
+                                endCoordinates: {
+                                    width: position.x + item.width,
+                                    depth: position.y + item.depth,
+                                    height: position.z + item.height
+                                }
+                            }
+                        }
+                    },
+                    { upsert: true } // Creates the item if it doesn't exist
+                );
+                console.log(`✅ Saved Item: ${item.itemId} to DB`);
+
                 placed = true;
                 break;
             }
@@ -108,13 +140,22 @@ router.post("/placement", async (req, res) => {
 
         // Retrieve containers and items from DB
         const dbContainers = await Container.find({});
-        const dbItems = await Item.find({ itemId: { $in: items.map(i => i.itemId) } });
+        const dbItemsFromDB = await Item.find({ itemId: { $in: items.map(i => i.itemId) } });
+
+        // Merge request items with DB items
+        const dbItems = items.map(reqItem => {
+            const dbItem = dbItemsFromDB.find(dbItem => dbItem.itemId === reqItem.itemId);
+            return {
+                ...reqItem,  // Keep request body dimensions
+                ...(dbItem || {}) // Merge missing properties from DB
+            };
+        });
 
         console.log("✅ Items from DB:", dbItems);
         console.log("✅ Containers from DB:", dbContainers);
 
         // Run optimized placement algorithm
-        const placements = placeItems(dbItems, dbContainers);
+        const placements = await placeItems(dbItems, dbContainers);
 
         console.log("🚀 Final Placements:", placements);
 
